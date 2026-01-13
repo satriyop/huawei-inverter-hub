@@ -55,11 +55,24 @@ export interface BrowserDevice {
   deviceDn: string;
   deviceName: string;
   deviceType: string;
+  deviceTypeId?: number;
   model?: string;
   status?: string;
+  communicationStatus?: string;
+  serialNumber?: string;
+  softwareVersion?: string;
+  stationDn?: string;
+  // Real-time data
   activePower?: number;
   dailyEnergy?: number;
   totalYield?: number;
+  gridVoltage?: number;
+  gridCurrent?: number;
+  gridFrequency?: number;
+  temperature?: number;
+  powerFactor?: number;
+  efficiency?: number;
+  inputPower?: number;
 }
 
 export class BrowserCrawler {
@@ -67,6 +80,8 @@ export class BrowserCrawler {
   private page: Page | null = null;
   private isLoggedIn = false;
   private zoneId: string | null = null;
+  private lastLoginTime: number = 0;
+  private sessionValidityMinutes = 25; // FusionSolar session typically expires after 30 min
 
   /**
    * Start the browser
@@ -129,6 +144,7 @@ export class BrowserCrawler {
     this.zoneId = zoneIdMatch ? zoneIdMatch[1] : null;
 
     this.isLoggedIn = true;
+    this.lastLoginTime = Date.now();
     logger.info('Login successful!');
     if (this.zoneId) {
       logger.info(`Zone ID: ${this.zoneId}`);
@@ -352,14 +368,35 @@ export class BrowserCrawler {
     const devices: BrowserDevice[] = [];
     const rawDevices = result.data?.data || result.data || [];
 
+    // Log raw response for debugging
+    if (rawDevices.length > 0) {
+      const sample = rawDevices[0];
+      logger.info(`  Device fields: ${Object.keys(sample).join(', ')}`);
+      logger.debug(`  Sample device: ${JSON.stringify(sample, null, 2)}`);
+    }
+
     if (Array.isArray(rawDevices)) {
       for (const d of rawDevices) {
+        // Use mocTypeName if available (human-readable type from API)
+        // Otherwise map from typeId or moType
+        const deviceType = d.mocTypeName || this.mapDeviceType(d.typeId || d.moType || d.devTypeId);
+        const typeId = parseInt(String(d.typeId || d.moType || d.devTypeId || 0), 10);
+
+        // Parse device status - FusionSolar uses different status fields
+        // deviceStatus: numeric code, status: string, communication: connection status
+        const deviceStatus = d.deviceStatus || d.status || d.runStatus;
+        const commStatus = d.communication;
+
         devices.push({
           deviceDn: d.dn || d.deviceDn,
-          deviceName: d.name || d.deviceName,
-          deviceType: d.deviceType || d.type || 'Unknown',
-          model: d.model,
-          status: d.status,
+          deviceName: d.name || d.deviceName || d.moName,
+          deviceType,
+          deviceTypeId: typeId || undefined,
+          model: d.model || d.devModel || d.invType,
+          status: deviceStatus,
+          communicationStatus: commStatus,
+          serialNumber: d.sn || d.esn || d.serialNumber,
+          stationDn: d.stationKey || d.parentDn,
         });
       }
     }
@@ -373,6 +410,8 @@ export class BrowserCrawler {
    */
   async getDeviceData(deviceDn: string): Promise<Partial<BrowserDevice> | null> {
     if (!this.page || !this.isLoggedIn) throw new Error('Not logged in');
+
+    logger.debug(`  Fetching realtime data for device ${deviceDn}...`);
 
     const result = await this.page.evaluate(async (dn: string) => {
       try {
@@ -397,18 +436,71 @@ export class BrowserCrawler {
       }
     }, deviceDn);
 
-    if (result.error || !result.data) {
+    if (result.error) {
+      logger.debug(`    Device data error: ${result.error}`);
+      return null;
+    }
+
+    if (!result.data) {
       return null;
     }
 
     const data = result.data.data || result.data;
 
-    return {
-      activePower: this.parseNumber(data.activePower),
-      dailyEnergy: this.parseNumber(data.dailyEnergy),
-      totalYield: this.parseNumber(data.totalYield),
-      status: data.status,
+    // Log available fields for debugging
+    if (data && typeof data === 'object') {
+      const keys = Object.keys(data);
+      if (keys.length > 0) {
+        logger.debug(`    Device data fields: ${keys.slice(0, 15).join(', ')}${keys.length > 15 ? '...' : ''}`);
+      }
+    }
+
+    // Extract all available real-time data
+    // FusionSolar uses various field names depending on device type
+    const realtimeData: Partial<BrowserDevice> = {
+      activePower: this.parseNumber(
+        data.activePower || data.active_power || data.outputPower || data.power
+      ),
+      dailyEnergy: this.parseNumber(
+        data.dailyEnergy || data.day_cap || data.dayEnergy || data.todayEnergy
+      ),
+      totalYield: this.parseNumber(
+        data.totalYield || data.total_cap || data.totalEnergy || data.cumulativeEnergy
+      ),
+      gridVoltage: this.parseNumber(
+        data.gridVoltage || data.ab_u || data.uab || data.a_u || data.voltage
+      ),
+      gridCurrent: this.parseNumber(
+        data.gridCurrent || data.a_i || data.current || data.outputCurrent
+      ),
+      gridFrequency: this.parseNumber(
+        data.gridFrequency || data.frequency || data.elec_freq
+      ),
+      temperature: this.parseNumber(
+        data.temperature || data.inverterTemperature || data.internalTemp || data.temp
+      ),
+      powerFactor: this.parseNumber(
+        data.powerFactor || data.power_factor || data.pf
+      ),
+      efficiency: this.parseNumber(
+        data.efficiency || data.inverterEfficiency
+      ),
+      inputPower: this.parseNumber(
+        data.inputPower || data.dcPower || data.pv_power
+      ),
+      status: data.status || data.runStatus || data.state,
+      softwareVersion: data.softwareVersion || data.softVer || data.sw_version,
     };
+
+    // Log non-zero values for debugging
+    const nonZeroFields = Object.entries(realtimeData)
+      .filter(([, v]) => v !== 0 && v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => `${k}=${v}`);
+    if (nonZeroFields.length > 0) {
+      logger.debug(`    Device has data: ${nonZeroFields.join(', ')}`);
+    }
+
+    return realtimeData;
   }
 
   /**
@@ -420,8 +512,19 @@ export class BrowserCrawler {
     const stationResults: StationCrawlResult[] = [];
 
     try {
-      // Get all stations
-      const stations = await this.getStations();
+      // Ensure we have a valid session before crawling
+      await this.ensureValidSession();
+
+      // Get all stations with retry
+      const stations = await this.withRetry(
+        () => this.getStations(),
+        {
+          maxRetries: 3,
+          onRetry: (attempt, error) => {
+            logger.warn(`Station fetch attempt ${attempt} failed: ${error.message}`);
+          },
+        }
+      );
 
       if (stations.length === 0) {
         logger.warn('No stations found');
@@ -454,38 +557,42 @@ export class BrowserCrawler {
             if (deviceData) {
               Object.assign(device, deviceData);
             }
+
+            // Map device status to expected type
+            const deviceStatus = this.mapDeviceStatus(device.status);
+
             deviceResults.push({
               device: {
                 deviceDn: device.deviceDn,
                 deviceName: device.deviceName,
                 deviceType: device.deviceType as 'Inverter',
                 deviceModel: device.model || '',
-                softwareVersion: '',
+                softwareVersion: device.softwareVersion || '',
                 stationDn: station.stationDn,
-                status: (device.status as 'online') || 'offline',
+                status: deviceStatus,
               },
-              realtimeData: deviceData
-                ? {
-                    deviceDn: device.deviceDn,
-                    deviceName: device.deviceName,
-                    status: device.status || 'unknown',
-                    dailyEnergy: device.dailyEnergy || 0,
-                    totalYield: device.totalYield || 0,
-                    activePower: device.activePower || 0,
-                    reactivePower: 0,
-                    ratedPower: 0,
-                    powerFactor: 0,
-                    gridFrequency: 0,
-                    gridVoltage: 0,
-                    gridCurrent: 0,
-                    internalTemperature: 0,
-                    insulationResistance: 0,
-                    outputMode: '',
-                    startupTime: '',
-                    shutdownTime: '',
-                    pvStrings: [],
-                  }
-                : null,
+              realtimeData: {
+                deviceDn: device.deviceDn,
+                deviceName: device.deviceName,
+                status: device.status || 'unknown',
+                dailyEnergy: device.dailyEnergy || 0,
+                totalYield: device.totalYield || 0,
+                activePower: device.activePower || 0,
+                reactivePower: 0,
+                ratedPower: 0,
+                powerFactor: device.powerFactor || 0,
+                gridFrequency: device.gridFrequency || 0,
+                gridVoltage: device.gridVoltage || 0,
+                gridCurrent: device.gridCurrent || 0,
+                internalTemperature: device.temperature || 0,
+                insulationResistance: 0,
+                outputMode: '',
+                startupTime: '',
+                shutdownTime: '',
+                pvStrings: [],
+                efficiency: device.efficiency,
+                inputPower: device.inputPower,
+              },
             });
             await this.delay(500);
           }
@@ -542,12 +649,16 @@ export class BrowserCrawler {
 
           logger.info(`  ✓ Station crawled successfully`);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          logger.error(`  ✗ Failed to crawl station: ${message}`);
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.error(`  ✗ Failed to crawl station: ${err.message}`);
+
+          // Capture error state for debugging
+          await this.captureErrorState(err, `station-${station.stationDn}`);
+
           errors.push({
             stationDn: station.stationDn,
             endpoint: 'crawlStation',
-            message,
+            message: err.message,
             timestamp: new Date(),
           });
         }
@@ -561,8 +672,11 @@ export class BrowserCrawler {
         duration: Date.now() - startTime,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Crawl failed: ${message}`);
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error(`Crawl failed: ${err.message}`);
+
+      // Capture error state for debugging
+      await this.captureErrorState(err, 'crawl-main');
 
       return {
         timestamp: new Date(),
@@ -572,7 +686,7 @@ export class BrowserCrawler {
           ...errors,
           {
             endpoint: 'crawl',
-            message,
+            message: err.message,
             timestamp: new Date(),
           },
         ],
@@ -778,6 +892,205 @@ export class BrowserCrawler {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Map device status to expected type
+   */
+  private mapDeviceStatus(status: string | undefined): 'online' | 'offline' | 'standby' | 'fault' {
+    if (!status) return 'offline';
+
+    const statusLower = status.toLowerCase();
+
+    if (statusLower.includes('online') || statusLower.includes('running') || statusLower === '1') {
+      return 'online';
+    }
+    if (statusLower.includes('standby') || statusLower.includes('waiting') || statusLower === '2') {
+      return 'standby';
+    }
+    if (statusLower.includes('fault') || statusLower.includes('error') || statusLower.includes('alarm')) {
+      return 'fault';
+    }
+
+    return 'offline';
+  }
+
+  /**
+   * Map device type code to readable name
+   */
+  private mapDeviceType(typeCode: string | number | undefined): string {
+    if (!typeCode) return 'Unknown';
+
+    const typeStr = String(typeCode).toLowerCase();
+
+    // Common FusionSolar device type mappings
+    const typeMap: Record<string, string> = {
+      // Inverter types
+      'inverter': 'Inverter',
+      'inv': 'Inverter',
+      '1': 'Inverter',
+      '38': 'Inverter',
+      '39': 'String Inverter',
+      // Battery/ESS
+      'battery': 'Battery',
+      'ess': 'ESS',
+      '2': 'Battery',
+      // Meter
+      'meter': 'Meter',
+      '3': 'Meter',
+      '17': 'Meter',
+      '47': 'Smart Meter',
+      // Optimizer
+      'optimizer': 'Optimizer',
+      '4': 'Optimizer',
+      // Gateway/Logger
+      'gateway': 'Gateway',
+      'logger': 'Data Logger',
+      'smartlogger': 'SmartLogger',
+      '5': 'Gateway',
+      '62': 'SmartLogger',
+    };
+
+    return typeMap[typeStr] || `Device (${typeCode})`;
+  }
+
+  // ============ Error Handling & Reliability ============
+
+  /**
+   * Execute a function with retry and exponential backoff
+   */
+  async withRetry<T>(
+    fn: () => Promise<T>,
+    options: {
+      maxRetries?: number;
+      baseDelay?: number;
+      maxDelay?: number;
+      onRetry?: (attempt: number, error: Error) => void;
+    } = {}
+  ): Promise<T> {
+    const {
+      maxRetries = 3,
+      baseDelay = 1000,
+      maxDelay = 10000,
+      onRetry,
+    } = options;
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        if (attempt < maxRetries) {
+          const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+          logger.warn(`Attempt ${attempt} failed: ${lastError.message}. Retrying in ${delay}ms...`);
+
+          if (onRetry) {
+            onRetry(attempt, lastError);
+          }
+
+          await this.delay(delay);
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Check if the current session is still valid
+   */
+  async isSessionValid(): Promise<boolean> {
+    if (!this.page || !this.isLoggedIn) return false;
+
+    try {
+      // Try to fetch a simple endpoint to check session validity
+      const result = await this.page.evaluate(async () => {
+        try {
+          const response = await fetch('/rest/pvms/web/station/v1/station/list?pageNo=1&pageSize=1');
+          return response.ok;
+        } catch {
+          return false;
+        }
+      });
+
+      return result;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Re-login if session has expired
+   */
+  async refreshSession(): Promise<void> {
+    logger.info('Refreshing session...');
+
+    this.isLoggedIn = false;
+
+    // Navigate back to login page and re-authenticate
+    await this.login();
+
+    logger.info('Session refreshed successfully');
+  }
+
+  /**
+   * Capture error state for debugging
+   */
+  async captureErrorState(error: Error, context: string): Promise<string> {
+    const timestamp = Date.now();
+    const filename = `logs/screenshots/error-${context}-${timestamp}.png`;
+
+    try {
+      if (this.page) {
+        await this.page.screenshot({ path: filename, fullPage: true });
+        logger.info(`Error screenshot saved: ${filename}`);
+      }
+
+      // Log additional debug info
+      logger.error(`Error context: ${context}`);
+      logger.error(`Error message: ${error.message}`);
+      logger.error(`Error stack: ${error.stack}`);
+
+      if (this.page) {
+        const currentUrl = this.page.url();
+        logger.error(`Current URL: ${currentUrl}`);
+      }
+    } catch (screenshotError) {
+      logger.warn(`Failed to capture error state: ${screenshotError}`);
+    }
+
+    return filename;
+  }
+
+  /**
+   * Ensure we have a valid session, re-login if needed
+   */
+  async ensureValidSession(): Promise<void> {
+    if (!this.isLoggedIn) {
+      logger.info('Not logged in, initiating login...');
+      await this.login();
+      return;
+    }
+
+    // Skip validation if login is recent (within validity window)
+    const timeSinceLogin = Date.now() - this.lastLoginTime;
+    const validityMs = this.sessionValidityMinutes * 60 * 1000;
+
+    if (timeSinceLogin < validityMs) {
+      logger.debug(`Session is recent (${Math.round(timeSinceLogin / 1000)}s old), skipping validation`);
+      return;
+    }
+
+    // Session might be expired, validate it
+    logger.info('Session age exceeds validity window, validating...');
+    const isValid = await this.isSessionValid();
+    if (!isValid) {
+      logger.warn('Session expired, refreshing...');
+      await this.refreshSession();
+    }
   }
 }
 

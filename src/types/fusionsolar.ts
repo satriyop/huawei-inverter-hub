@@ -87,6 +87,9 @@ export interface InverterRealtimeData {
   startupTime: string;
   shutdownTime: string;
   pvStrings: PVString[];
+  // Additional real-time fields
+  efficiency?: number;         // %
+  inputPower?: number;         // kW (DC input from PV)
 }
 
 export interface PVString {

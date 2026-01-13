@@ -6,7 +6,6 @@
 import { config } from './config/index.js';
 import { logger } from './utils/logger.js';
 import { FusionSolarAuthenticator } from './services/authenticator.js';
-import { FusionSolarApiClient } from './services/api-client.js';
 
 async function testLogin() {
   logger.info('='.repeat(60));
@@ -18,7 +17,6 @@ async function testLogin() {
   logger.info('');
 
   const authenticator = new FusionSolarAuthenticator();
-  const apiClient = new FusionSolarApiClient();
 
   try {
     // Step 1: Login and fetch stations using browser-based API calls

@@ -132,7 +132,7 @@ const apiClient = axios.create({
   },
 });
 
-async function pushStationDirect(client: NexSolarHubClient, data: {
+async function pushStationDirect(_client: NexSolarHubClient, data: {
   external_id: string;
   name: string;
   status: string;
@@ -141,7 +141,7 @@ async function pushStationDirect(client: NexSolarHubClient, data: {
   return response.data.data;
 }
 
-async function pushReadingDirect(client: NexSolarHubClient, data: {
+async function pushReadingDirect(_client: NexSolarHubClient, data: {
   station_external_id: string;
   recorded_at: string;
   current_power_kw: number | null;
@@ -151,7 +151,7 @@ async function pushReadingDirect(client: NexSolarHubClient, data: {
   return response.data.data;
 }
 
-async function pushCrawlSummaryDirect(client: NexSolarHubClient, data: {
+async function pushCrawlSummaryDirect(_client: NexSolarHubClient, data: {
   crawled_at: string;
   duration_ms: number;
   stations_count: number;

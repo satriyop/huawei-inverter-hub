@@ -125,6 +125,8 @@ export class JsonOutput {
         deviceDn: d.device.deviceDn,
         deviceName: d.device.deviceName,
         deviceType: d.device.deviceType,
+        model: d.device.deviceModel,
+        softwareVersion: d.device.softwareVersion || null,
         status: d.device.status,
         realtimeData: d.realtimeData
           ? {
@@ -134,6 +136,17 @@ export class JsonOutput {
               dailyEnergyUnit: 'kWh',
               totalYield: d.realtimeData.totalYield,
               totalYieldUnit: 'kWh',
+              gridVoltage: d.realtimeData.gridVoltage,
+              gridVoltageUnit: 'V',
+              gridCurrent: d.realtimeData.gridCurrent,
+              gridCurrentUnit: 'A',
+              gridFrequency: d.realtimeData.gridFrequency,
+              gridFrequencyUnit: 'Hz',
+              temperature: d.realtimeData.internalTemperature,
+              temperatureUnit: '°C',
+              powerFactor: d.realtimeData.powerFactor,
+              efficiency: d.realtimeData.efficiency ?? null,
+              inputPower: d.realtimeData.inputPower ?? null,
             }
           : null,
       })),
