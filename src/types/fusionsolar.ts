@@ -158,6 +158,7 @@ export interface SessionInfo {
   cookies: Cookie[];
   isAlive: boolean;
   lastChecked: Date;
+  zoneId?: string;  // e.g., "region-7-c7e0bcd3-ac22-4ad2-bb65-3d2c7c8b8008"
 }
 
 export interface Cookie {

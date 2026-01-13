@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance } from 'axios';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import type {
@@ -14,7 +14,6 @@ import type {
 
 export class FusionSolarApiClient {
   private client: AxiosInstance;
-  private cookies: Cookie[] = [];
 
   constructor() {
     this.client = axios.create({
@@ -51,10 +50,9 @@ export class FusionSolarApiClient {
   }
 
   /**
-   * Set session cookies for API requests
+   * Set session cookies and zone ID for API requests
    */
-  setCookies(cookies: Cookie[]): void {
-    this.cookies = cookies;
+  setCookies(cookies: Cookie[], zoneId?: string): void {
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
     this.client.defaults.headers.common['Cookie'] = cookieHeader;
 
@@ -64,6 +62,12 @@ export class FusionSolarApiClient {
       this.client.defaults.headers.common['X-XSRF-TOKEN'] = decodeURIComponent(
         xsrfCookie.value
       );
+    }
+
+    // Set zone ID and related headers for FusionSolar multi-tenant API
+    if (zoneId) {
+      this.client.defaults.headers.common['roarand'] = zoneId;
+      logger.info(`Zone ID set: ${zoneId}`);
     }
 
     logger.info(`API client configured with ${cookies.length} cookies`);
@@ -106,14 +110,34 @@ export class FusionSolarApiClient {
 
     // The response structure may vary, try to extract data
     const data = response.data;
+    logger.debug(`Station list response status: ${response.status}`);
+    logger.debug(`Station list raw response type: ${typeof data}`);
+
+    // If response is a string (HTML redirect page), log first 500 chars
+    if (typeof data === 'string') {
+      logger.debug(`Response is string (first 500 chars): ${data.substring(0, 500)}`);
+      logger.warn('API returned HTML instead of JSON - possible session/auth issue');
+      return [];
+    }
+
+    logger.debug(`Station list raw response keys: ${data ? JSON.stringify(Object.keys(data)) : 'null/undefined'}`);
+    logger.debug(`Station list raw response: ${JSON.stringify(data, null, 2)}`);
+
+    // FusionSolar API returns { data: { list: [...] } } structure
+    if (data.data?.list) {
+      return data.data.list;
+    }
     if (data.data) {
       return data.data;
+    }
+    if (data.list) {
+      return data.list;
     }
     if (Array.isArray(data)) {
       return data;
     }
 
-    logger.warn('Unexpected station list response structure:', data);
+    logger.warn('Unexpected station list response structure:', JSON.stringify(data, null, 2));
     return [];
   }
 

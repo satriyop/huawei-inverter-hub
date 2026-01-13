@@ -1,7 +1,9 @@
-import puppeteer, { Browser, Page, Cookie as PuppeteerCookie } from 'puppeteer';
+import puppeteer, { Browser, Page, Protocol } from 'puppeteer';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import type { SessionInfo, Cookie } from '../types/fusionsolar.js';
+
+type PuppeteerCookie = Protocol.Network.Cookie;
 
 export class FusionSolarAuthenticator {
   private browser: Browser | null = null;
@@ -14,9 +16,10 @@ export class FusionSolarAuthenticator {
     logger.info('Starting FusionSolar login...');
 
     try {
-      // Launch browser
+      // Launch browser using system Chrome (more reliable on macOS)
       this.browser = await puppeteer.launch({
         headless: config.crawler.headless,
+        executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -62,13 +65,22 @@ export class FusionSolarAuthenticator {
       // Extract cookies
       const cookies = await this.extractCookies(page);
 
+      // Extract zone-id from URL
+      const currentUrl = page.url();
+      const zoneIdMatch = currentUrl.match(/zone-id=([^&]+)/);
+      const zoneId = zoneIdMatch ? zoneIdMatch[1] : undefined;
+
       this.sessionInfo = {
         cookies,
         isAlive: true,
         lastChecked: new Date(),
+        zoneId,
       };
 
       logger.info('Login successful! Session cookies extracted.');
+      if (zoneId) {
+        logger.info(`Zone ID: ${zoneId}`);
+      }
 
       return this.sessionInfo;
     } catch (error) {
@@ -242,7 +254,7 @@ export class FusionSolarAuthenticator {
           '.error, .alert, [class*="error"], [class*="alert"]'
         );
         return Array.from(errorElements)
-          .map((el) => el.textContent)
+          .map((el: Element) => el.textContent)
           .join(', ');
       });
 
@@ -269,6 +281,222 @@ export class FusionSolarAuthenticator {
       httpOnly: cookie.httpOnly,
       secure: cookie.secure,
     }));
+  }
+
+  /**
+   * Login and make initial API calls from within browser session
+   * This ensures all correct headers and credentials are used
+   */
+  async loginAndFetchStations(): Promise<{
+    session: SessionInfo;
+    stations: unknown[];
+  }> {
+    logger.info('Starting FusionSolar login with API fetch...');
+
+    try {
+      // Launch browser using system Chrome
+      this.browser = await puppeteer.launch({
+        headless: config.crawler.headless,
+        executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--window-size=1920,1080',
+        ],
+      });
+
+      const page = await this.browser.newPage();
+      await page.setViewport({ width: 1920, height: 1080 });
+      await page.setUserAgent(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      );
+
+      // Navigate and login
+      logger.info('Navigating to login page...');
+      await page.goto(config.fusionSolar.loginUrl, {
+        waitUntil: 'networkidle2',
+        timeout: 60000,
+      });
+
+      await this.waitForLoginForm(page);
+      logger.info('Entering credentials...');
+      await this.enterCredentials(page);
+      logger.info('Submitting login...');
+      await this.submitLogin(page);
+      logger.info('Waiting for login completion...');
+      await this.waitForLoginSuccess(page);
+
+      // Extract cookies and zone ID
+      const cookies = await this.extractCookies(page);
+      const currentUrl = page.url();
+      // Zone ID ends at & or # (hash fragment)
+      const zoneIdMatch = currentUrl.match(/zone-id=([^&#]+)/);
+      const zoneId = zoneIdMatch ? zoneIdMatch[1] : undefined;
+
+      logger.info('Login successful! Waiting for station data to load...');
+
+      // Wait for the page to be fully loaded with station data
+      // The station cards should have station names
+      try {
+        await page.waitForSelector('[class*="station"], [class*="plant"], [data-testid*="station"]', {
+          timeout: 15000,
+        });
+      } catch {
+        logger.info('No station selectors found, trying to extract from page state...');
+      }
+
+      // Additional wait for JavaScript to finish
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      // Wait a bit more for the data to fully render
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      // Take a screenshot for debugging
+      await page.screenshot({ path: 'logs/station-page.png', fullPage: true });
+      logger.info('Screenshot saved to logs/station-page.png');
+
+      // Try to extract station data from the page's DOM
+      const stations = await page.evaluate(() => {
+        const results: Array<{
+          stationName: string;
+          stationDn: string;
+          currentPower: string | null;
+          yieldToday: string | null;
+        }> = [];
+
+        // Method 1: Look for node-name elements with ID containing NE=
+        // Pattern: <span class="node-name" id="monitor-layout-node-name-NE=69233242">SITESANANIBUN</span>
+        const nodeNameElements = document.querySelectorAll('span.node-name[id*="NE="]');
+        nodeNameElements.forEach((el) => {
+          const id = el.getAttribute('id') || '';
+          const dnMatch = id.match(/NE=(\d+)/);
+          const name = el.textContent?.trim();
+
+          if (dnMatch && name) {
+            results.push({
+              stationName: name,
+              stationDn: `NE=${dnMatch[1]}`,
+              currentPower: null,
+              yieldToday: null,
+            });
+          }
+        });
+
+        // Method 2: Look for elements with title attribute containing station name
+        if (results.length === 0) {
+          const titledElements = document.querySelectorAll('[title]');
+          titledElements.forEach((el) => {
+            const title = el.getAttribute('title') || '';
+            const id = el.getAttribute('id') || '';
+            // Check if this looks like a station name (uppercase alphanumeric)
+            if (/^[A-Z0-9]+$/.test(title) && title.length > 3) {
+              // Try to find station DN from ID
+              const dnMatch = id.match(/(\d+)$/);
+              if (dnMatch) {
+                results.push({
+                  stationName: title,
+                  stationDn: `NE=${dnMatch[1]}`,
+                  currentPower: null,
+                  yieldToday: null,
+                });
+              }
+            }
+          });
+        }
+
+        // Deduplicate by stationDn
+        const unique = results.filter((item, index, self) =>
+          index === self.findIndex((t) => t.stationDn === item.stationDn)
+        );
+
+        return {
+          found: unique.length,
+          stations: unique,
+        };
+      });
+
+      logger.info(`DOM extraction found ${stations.found} stations`);
+      stations.stations.forEach((s) => {
+        logger.info(`  - ${s.stationName} (${s.stationDn})`);
+      });
+
+      // Now fetch detailed data for each station using browser fetch
+      for (const station of stations.stations) {
+        logger.info(`Fetching data for ${station.stationName}...`);
+
+        // Get energy balance using browser fetch
+        const energyData = await page.evaluate(async (stationDn: string) => {
+          try {
+            const queryTime = new Date().setHours(0, 0, 0, 0);
+            const date = new Date();
+            const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} 00:00:00`;
+
+            const params = new URLSearchParams({
+              stationDn,
+              timeDim: '2',
+              timeZone: '7.0',
+              timeZoneStr: 'Asia/Jakarta',
+              queryTime: String(queryTime),
+              dateStr,
+              _: String(Date.now()),
+            });
+
+            const response = await fetch(`/rest/pvms/web/station/v3/overview/energy-balance?${params}`);
+
+            if (!response.ok) {
+              return { error: `HTTP ${response.status}`, data: null };
+            }
+
+            const data = await response.json();
+            return { error: null, data };
+          } catch (error) {
+            return { error: String(error), data: null };
+          }
+        }, station.stationDn);
+
+        // Update station with energy data
+        if (energyData.data?.success && energyData.data?.data) {
+          const data = energyData.data.data;
+          // Try different field names for power/energy
+          station.currentPower = data.realTimePower?.toString() ||
+            data.currentPower?.toString() ||
+            data.power?.toString() || null;
+          station.yieldToday = data.dayEnergy?.toString() ||
+            data.yieldToday?.toString() ||
+            data.dailyEnergy?.toString() || null;
+
+          logger.info(`  Energy data available: existInverter=${data.existInverter}, existMeter=${data.existMeter}`);
+          // Log a summary of what data we got
+          const keys = Object.keys(data);
+          logger.info(`  Available fields: ${keys.slice(0, 15).join(', ')}${keys.length > 15 ? '...' : ''}`);
+        } else if (energyData.error) {
+          logger.warn(`  Error: ${energyData.error}`);
+        }
+      }
+
+      this.sessionInfo = {
+        cookies,
+        isAlive: true,
+        lastChecked: new Date(),
+        zoneId,
+      };
+
+      // Extract station list from DOM results
+      const stationList = stations.stations || [];
+
+      return {
+        session: this.sessionInfo,
+        stations: stationList,
+      };
+    } finally {
+      if (this.browser) {
+        await this.browser.close();
+        this.browser = null;
+      }
+    }
   }
 
   /**
