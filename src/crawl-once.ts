@@ -1,13 +1,26 @@
 /**
  * Run a single crawl cycle with the new BrowserCrawler
- * Run with: npm run crawl:once
+ *
+ * Usage:
+ *   npm run crawl:once           # Crawl and save to JSON only
+ *   npm run crawl:once -- --push # Crawl and push to Laravel
  */
 
 import { logger } from './utils/logger.js';
 import { BrowserCrawler } from './services/browser-crawler.js';
 import { JsonOutput } from './services/json-output.js';
+import { NexSolarHubClient } from './services/nexsolarhub-client.js';
+import { config } from './config/index.js';
+
+// Parse command line arguments
+function parseArgs(): { push: boolean } {
+  const args = process.argv.slice(2);
+  const push = args.includes('--push') || config.nexSolarHub.pushEnabled;
+  return { push };
+}
 
 async function crawlOnce() {
+  const { push } = parseArgs();
   logger.info('='.repeat(60));
   logger.info('FusionSolar Crawler - Single Run (Browser-based)');
   logger.info('='.repeat(60));
@@ -42,6 +55,26 @@ async function crawlOnce() {
     // Also save individual station files
     for (const station of result.stations) {
       await jsonOutput.saveStation(station);
+    }
+
+    // Push to Laravel if enabled
+    if (push) {
+      logger.info('');
+      logger.info('Step 5: Pushing to Laravel...');
+      const client = new NexSolarHubClient();
+
+      // Health check
+      const isHealthy = await client.healthCheck();
+      if (!isHealthy) {
+        logger.error('  ✗ Laravel API health check failed');
+      } else {
+        const pushResult = await client.pushCrawlResult(result);
+        if (pushResult.success) {
+          logger.info(`  ✓ Pushed: ${pushResult.stationsPushed} stations, ${pushResult.devicesPushed} devices, ${pushResult.readingsPushed} readings`);
+        } else {
+          logger.warn(`  ⚠ Push completed with errors: ${pushResult.errors.join(', ')}`);
+        }
+      }
     }
 
     // Print summary

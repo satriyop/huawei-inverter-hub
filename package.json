@@ -10,6 +10,8 @@
     "dev": "tsx watch src/index.ts",
     "crawl": "tsx src/index.ts",
     "crawl:once": "tsx src/crawl-once.ts",
+    "crawl:push": "tsx src/crawl-once.ts --push",
+    "push:laravel": "tsx src/push-to-laravel.ts",
     "test:login": "tsx src/test-login.ts",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit"

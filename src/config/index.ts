@@ -21,6 +21,7 @@ export interface Config {
   nexSolarHub: {
     apiUrl: string;
     apiKey: string;
+    pushEnabled: boolean;
   };
   logging: {
     level: string;
@@ -73,6 +74,7 @@ export const config: Config = {
   nexSolarHub: {
     apiUrl: requireEnv('NEXSOLARHUB_API_URL'),
     apiKey: requireEnv('NEXSOLARHUB_API_KEY'),
+    pushEnabled: optionalEnvBoolean('PUSH_TO_LARAVEL', false),
   },
   logging: {
     level: optionalEnv('LOG_LEVEL', 'info'),
