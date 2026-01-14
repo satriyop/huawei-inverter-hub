@@ -165,7 +165,7 @@ export class NexSolarHubClient {
   async pushStationData(
     stationResult: StationCrawlResult
   ): Promise<{ devicesPushed: number; readingsPushed: number; alarmsPushed: number }> {
-    const { station, realtimeKpi, energyBalance, devices, alarms } = stationResult;
+    const { station, realtimeKpi, energyBalance, environmental, devices, alarms } = stationResult;
     const recordedAt = new Date().toISOString();
     let devicesPushed = 0;
     let readingsPushed = 0;
@@ -203,6 +203,9 @@ export class NexSolarHubClient {
           fed_to_grid_kwh: energyBalance.fedToGrid,
           consumed_by_appliances_kwh: energyBalance.consumedByAppliances,
           from_grid_kwh: energyBalance.fromGrid,
+          co2_avoided_tons: environmental?.co2Avoided,
+          trees_planted: environmental?.equivalentTreesPlanted,
+          coal_saved_tons: environmental?.standardCoalSaved,
         }),
       `Push reading for ${station.stationDn}`
     );
@@ -233,6 +236,8 @@ export class NexSolarHubClient {
             grid_frequency_hz: realtimeData?.gridFrequency,
             internal_temperature_c: realtimeData?.internalTemperature,
             power_factor: realtimeData?.powerFactor,
+            efficiency: realtimeData?.efficiency,
+            input_power_kw: realtimeData?.inputPower,
             pv_strings: realtimeData?.pvStrings?.length
               ? realtimeData.pvStrings.map((pv) => ({
                   stringId: pv.stringId,

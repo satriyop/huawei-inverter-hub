@@ -1399,55 +1399,261 @@ export class BrowserCrawler {
 
   /**
    * Get real-time data for a device (inverter or meter)
+   * Tries multiple API endpoints to find one that returns actual readings
    */
   async getDeviceData(deviceDn: string): Promise<Partial<BrowserDevice> | null> {
     if (!this.page || !this.isLoggedIn) throw new Error('Not logged in');
 
-    logger.debug(`  Fetching realtime data for device ${deviceDn}...`);
+    logger.info(`  Fetching realtime data for device ${deviceDn}...`);
 
+    // Try multiple API endpoints to get device data
     const result = await this.page.evaluate(async (dn: string) => {
+      const results: Record<string, unknown> = {};
+
+      // Method 1: device-realtime-kpi (most likely to have power data)
       try {
-        const params = new URLSearchParams({
-          deviceDn: dn,
-          displayAccessModel: 'true',
-          _: String(Date.now()),
-        });
-
-        const response = await fetch(
-          `/rest/pvms/web/device/v1/device-realtime-data?${params}`
+        const kpiResponse = await fetch(
+          `/rest/pvms/web/device/v1/device-realtime-kpi?deviceDn=${encodeURIComponent(dn)}&_=${Date.now()}`
         );
-
-        if (!response.ok) {
-          return { error: `HTTP ${response.status}`, data: null };
+        if (kpiResponse.ok) {
+          const data = await kpiResponse.json();
+          results['device-realtime-kpi'] = { status: kpiResponse.status, data };
+        } else {
+          results['device-realtime-kpi'] = { status: kpiResponse.status };
         }
+      } catch (e) { results['device-realtime-kpi'] = { error: String(e) }; }
 
-        const json = await response.json();
-        return { error: null, data: json };
-      } catch (error) {
-        return { error: String(error), data: null };
-      }
+      // Method 2: device-history-data with current time (sometimes has realtime)
+      try {
+        const now = Date.now();
+        const historyResponse = await fetch(
+          `/rest/pvms/web/device/v1/device-history-data?deviceDn=${encodeURIComponent(dn)}&startTime=${now - 300000}&endTime=${now}&_=${now}`
+        );
+        if (historyResponse.ok) {
+          const data = await historyResponse.json();
+          results['device-history-data'] = { status: historyResponse.status, data };
+        } else {
+          results['device-history-data'] = { status: historyResponse.status };
+        }
+      } catch (e) { results['device-history-data'] = { error: String(e) }; }
+
+      // Method 3: inverter-realtime-data (specific for inverters)
+      try {
+        const invResponse = await fetch(
+          `/rest/pvms/web/device/v1/inverter-realtime-data?deviceDn=${encodeURIComponent(dn)}&_=${Date.now()}`
+        );
+        if (invResponse.ok) {
+          const data = await invResponse.json();
+          results['inverter-realtime-data'] = { status: invResponse.status, data };
+        } else {
+          results['inverter-realtime-data'] = { status: invResponse.status };
+        }
+      } catch (e) { results['inverter-realtime-data'] = { error: String(e) }; }
+
+      // Method 4: device-statistics-signal (may have signal data)
+      try {
+        const sigResponse = await fetch(
+          `/rest/pvms/web/device/v1/device-statistics-signal?deviceDn=${encodeURIComponent(dn)}&_=${Date.now()}`
+        );
+        if (sigResponse.ok) {
+          const data = await sigResponse.json();
+          results['device-statistics-signal'] = { status: sigResponse.status, data };
+        } else {
+          results['device-statistics-signal'] = { status: sigResponse.status };
+        }
+      } catch (e) { results['device-statistics-signal'] = { error: String(e) }; }
+
+      // Method 5: device-realtime-data (original - returns status only)
+      try {
+        const rtResponse = await fetch(
+          `/rest/pvms/web/device/v1/device-realtime-data?deviceDn=${encodeURIComponent(dn)}&displayAccessModel=true&_=${Date.now()}`
+        );
+        if (rtResponse.ok) {
+          const data = await rtResponse.json();
+          results['device-realtime-data'] = { status: rtResponse.status, data };
+        } else {
+          results['device-realtime-data'] = { status: rtResponse.status };
+        }
+      } catch (e) { results['device-realtime-data'] = { error: String(e) }; }
+
+      // Method 6: mo-details (device metadata and possibly readings)
+      try {
+        const moResponse = await fetch(
+          `/rest/pvms/web/device/v1/mo-details?dn=${encodeURIComponent(dn)}&_=${Date.now()}`
+        );
+        if (moResponse.ok) {
+          const data = await moResponse.json();
+          results['mo-details'] = { status: moResponse.status, data };
+        } else {
+          results['mo-details'] = { status: moResponse.status };
+        }
+      } catch (e) { results['mo-details'] = { error: String(e) }; }
+
+      // Method 7: dev-real-kpi (alternative KPI endpoint)
+      try {
+        const devKpiResponse = await fetch(
+          `/rest/pvms/web/device/v1/dev-real-kpi?devIds=${encodeURIComponent(dn)}&_=${Date.now()}`
+        );
+        if (devKpiResponse.ok) {
+          const data = await devKpiResponse.json();
+          results['dev-real-kpi'] = { status: devKpiResponse.status, data };
+        } else {
+          results['dev-real-kpi'] = { status: devKpiResponse.status };
+        }
+      } catch (e) { results['dev-real-kpi'] = { error: String(e) }; }
+
+      return results;
     }, deviceDn);
 
-    if (result.error) {
-      logger.debug(`    Device data error: ${result.error}`);
-      return null;
-    }
+    // Extract signals from device-realtime-data API response
+    // Response format: [{"status":1}, {"groupName":"Others","signals":[{id,name,realValue,value,unit},...]}]
+    let signals: Array<{ id: number; name: string; realValue: string; value: string; unit: string }> = [];
+    let deviceConnectionStatus = 0;
 
-    if (!result.data) {
-      return null;
-    }
+    const deviceRealtimeResult = result['device-realtime-data'] as { status?: number; data?: { data?: unknown[] } };
+    if (deviceRealtimeResult?.data?.data && Array.isArray(deviceRealtimeResult.data.data)) {
+      const items = deviceRealtimeResult.data.data;
 
-    const data = result.data.data || result.data;
+      for (const item of items) {
+        const itemObj = item as Record<string, unknown>;
 
-    // Log available fields for debugging
-    if (data && typeof data === 'object') {
-      const keys = Object.keys(data);
-      if (keys.length > 0) {
-        logger.debug(`    Device data fields: ${keys.slice(0, 20).join(', ')}${keys.length > 20 ? '...' : ''}`);
+        // First item is connection status: {"status":1}
+        if (typeof itemObj.status === 'number' && !itemObj.groupName) {
+          deviceConnectionStatus = itemObj.status;
+          logger.info(`    Device connection status: ${deviceConnectionStatus === 1 ? 'online' : 'offline'}`);
+        }
+
+        // Signal groups: {"groupName":"Others","signals":[...]}
+        if (itemObj.signals && Array.isArray(itemObj.signals)) {
+          const groupName = itemObj.groupName || 'Unknown';
+          logger.info(`    Signal group "${groupName}": ${itemObj.signals.length} signals`);
+
+          for (const sig of itemObj.signals) {
+            const signal = sig as { id?: number; name?: string; realValue?: string; value?: string; unit?: string };
+            if (signal.id !== undefined) {
+              signals.push({
+                id: signal.id,
+                name: signal.name || '',
+                realValue: String(signal.realValue || ''),
+                value: String(signal.value || ''),
+                unit: signal.unit || '',
+              });
+            }
+          }
+        }
       }
     }
 
-    // Extract all available real-time data
+    // Log extracted signals
+    if (signals.length > 0) {
+      logger.info(`    Extracted ${signals.length} total signals`);
+      // Log first 5 signals for debugging
+      const sampleSignals = signals.slice(0, 5).map(s => `${s.id}:${s.name}=${s.realValue}${s.unit}`);
+      logger.info(`    Sample signals: ${sampleSignals.join(', ')}`);
+    } else {
+      logger.warn(`    No signals found for ${deviceDn}`);
+    }
+
+    // Build data object from signals using name-based matching
+    // This is more reliable than ID-based mapping since IDs can vary
+    const data: Record<string, unknown> = {};
+    data._connectionStatus = deviceConnectionStatus;
+
+    // Map signal names to our field names (case-insensitive matching)
+    // Note: Unit conversion is handled separately based on signal.unit
+    const namePatterns: Array<{ pattern: RegExp; field: string; transform?: (v: string) => number }> = [
+      // Power signals (unit conversion handled below)
+      { pattern: /^active\s*power$/i, field: 'activePower' },
+      { pattern: /^output\s*power$/i, field: 'activePower' },
+      { pattern: /^reactive\s*power$/i, field: 'reactivePower' },
+      { pattern: /^output\s*reactive\s*power$/i, field: 'reactivePower' },
+      { pattern: /^input\s*power$/i, field: 'inputPower' },
+      { pattern: /^dc\s*power$/i, field: 'inputPower' },
+
+      // Energy signals
+      { pattern: /^daily\s*energy$/i, field: 'dailyEnergy', transform: parseFloat },
+      { pattern: /^day\s*energy$/i, field: 'dailyEnergy', transform: parseFloat },
+      { pattern: /^total\s*yield$/i, field: 'totalYield', transform: parseFloat },
+      { pattern: /^total\s*energy$/i, field: 'totalYield', transform: parseFloat },
+      { pattern: /^cumulative\s*energy$/i, field: 'totalYield', transform: parseFloat },
+      { pattern: /^positive\s*active\s*energy$/i, field: 'positiveActiveEnergy', transform: parseFloat },
+      { pattern: /^negative\s*active\s*energy$/i, field: 'negativeActiveEnergy', transform: parseFloat },
+
+      // Grid signals
+      { pattern: /^grid\s*voltage$/i, field: 'gridVoltage', transform: parseFloat },
+      { pattern: /^output\s*voltage$/i, field: 'gridVoltage', transform: parseFloat },
+      { pattern: /^a[\-_]?phase\s*voltage$/i, field: 'gridVoltage', transform: parseFloat },
+      { pattern: /^grid\s*current$/i, field: 'gridCurrent', transform: parseFloat },
+      { pattern: /^output\s*current$/i, field: 'gridCurrent', transform: parseFloat },
+      { pattern: /^grid\s*frequency$/i, field: 'gridFrequency', transform: parseFloat },
+      { pattern: /^frequency$/i, field: 'gridFrequency', transform: parseFloat },
+      { pattern: /^power\s*factor$/i, field: 'powerFactor', transform: parseFloat },
+
+      // Temperature
+      { pattern: /temperature/i, field: 'temperature', transform: parseFloat },
+      { pattern: /^internal\s*temp/i, field: 'temperature', transform: parseFloat },
+
+      // Efficiency
+      { pattern: /^efficiency$/i, field: 'efficiency', transform: parseFloat },
+      { pattern: /^inverter\s*efficiency$/i, field: 'efficiency', transform: parseFloat },
+
+      // PV string signals
+      { pattern: /^pv1?\s*voltage$/i, field: 'pv1Voltage', transform: parseFloat },
+      { pattern: /^pv1?\s*current$/i, field: 'pv1Current', transform: parseFloat },
+      { pattern: /^pv2\s*voltage$/i, field: 'pv2Voltage', transform: parseFloat },
+      { pattern: /^pv2\s*current$/i, field: 'pv2Current', transform: parseFloat },
+      { pattern: /^pv3\s*voltage$/i, field: 'pv3Voltage', transform: parseFloat },
+      { pattern: /^pv3\s*current$/i, field: 'pv3Current', transform: parseFloat },
+      { pattern: /^pv4\s*voltage$/i, field: 'pv4Voltage', transform: parseFloat },
+      { pattern: /^pv4\s*current$/i, field: 'pv4Current', transform: parseFloat },
+
+      // Status signals
+      { pattern: /^inverter\s*status$/i, field: 'statusCode' },
+      { pattern: /^meter\s*status$/i, field: 'meterStatusCode' },
+      { pattern: /^run\s*status$/i, field: 'runStatus' },
+      { pattern: /^device\s*status$/i, field: 'deviceStatus' },
+    ];
+
+    for (const signal of signals) {
+      // Try to match by signal name
+      for (const { pattern, field, transform } of namePatterns) {
+        if (pattern.test(signal.name)) {
+          let value = transform ? transform(signal.realValue) : parseFloat(signal.realValue);
+
+          // Handle unit conversions for power/energy values
+          const unit = signal.unit.toLowerCase();
+          if (field === 'activePower' || field === 'reactivePower' || field === 'inputPower') {
+            // Convert to kW if in W
+            if (unit === 'w' || unit === 'var') {
+              value = value / 1000;
+            }
+            // Already in kW or kvar - no conversion needed
+          }
+
+          // Only set if not already set (first match wins)
+          if (data[field] === undefined) {
+            data[field] = value;
+          }
+          break;
+        }
+      }
+
+      // Also store all signals by ID and name for debugging
+      data[`signal_${signal.id}`] = signal.realValue;
+      data[`signal_${signal.id}_name`] = signal.name;
+      data[`signal_${signal.id}_unit`] = signal.unit;
+    }
+
+    // Set connection status
+    data.connectionOnline = deviceConnectionStatus === 1;
+
+    // Log parsed data
+    const parsedFields = Object.entries(data)
+      .filter(([k, v]) => !k.startsWith('signal_') && k !== '_connectionStatus' && v !== undefined && v !== 0 && v !== '')
+      .map(([k, v]) => `${k}=${v}`);
+    logger.info(`    Parsed data: ${parsedFields.join(', ') || 'none'}`);
+
+    // Extract all available real-time data from parsed signals
     // FusionSolar uses various field names depending on device type (inverter vs meter)
     const realtimeData: Partial<BrowserDevice> = {
       // Common fields (inverter + meter)
@@ -1481,8 +1687,10 @@ export class BrowserCrawler {
       inputPower: this.parseNumber(
         data.inputPower || data.dcPower || data.pv_power
       ),
-      status: data.status || data.runStatus || data.state || data.meterStatus,
-      softwareVersion: data.softwareVersion || data.softVer || data.sw_version,
+      // Use connection status to determine device state
+      // connectionOnline is set from the API's device connection status
+      status: data.connectionOnline ? 'online' : String(data.statusCode || data.runStatus || data.state || data.meterStatusCode || data.deviceStatus || 'offline'),
+      softwareVersion: String(data.softwareVersion || data.softVer || data.sw_version || ''),
 
       // Meter-specific fields
       reactivePower: this.parseNumber(data.reactivePower || data.reactive_power),
