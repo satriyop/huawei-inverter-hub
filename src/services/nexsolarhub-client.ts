@@ -245,6 +245,10 @@ export class NexSolarHubClient {
                   current: pv.current,
                 }))
               : undefined,
+            // Meter-specific fields
+            reactive_power_kvar: realtimeData?.reactivePower,
+            positive_active_energy_kwh: realtimeData?.positiveActiveEnergy,
+            negative_active_energy_kwh: realtimeData?.negativeActiveEnergy,
           }),
         `Push device ${device.deviceDn}`
       );

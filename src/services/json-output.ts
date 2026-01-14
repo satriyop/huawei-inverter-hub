@@ -147,6 +147,15 @@ export class JsonOutput {
               powerFactor: d.realtimeData.powerFactor,
               efficiency: d.realtimeData.efficiency ?? null,
               inputPower: d.realtimeData.inputPower ?? null,
+              // Meter-specific fields
+              reactivePower: d.realtimeData.reactivePower ?? null,
+              reactivePowerUnit: 'kvar',
+              positiveActiveEnergy: d.realtimeData.positiveActiveEnergy ?? null,
+              positiveActiveEnergyUnit: 'kWh',
+              negativeActiveEnergy: d.realtimeData.negativeActiveEnergy ?? null,
+              negativeActiveEnergyUnit: 'kWh',
+              // PV Strings
+              pvStrings: d.realtimeData.pvStrings?.length ? d.realtimeData.pvStrings : null,
             }
           : null,
       })),

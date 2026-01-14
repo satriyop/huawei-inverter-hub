@@ -94,6 +94,16 @@ export interface BrowserDevice {
   abLineVoltage?: number;
   bcLineVoltage?: number;
   caLineVoltage?: number;
+
+  // PV String individual fields (for building pvStrings array)
+  pv1Voltage?: number;
+  pv1Current?: number;
+  pv2Voltage?: number;
+  pv2Current?: number;
+  pv3Voltage?: number;
+  pv3Current?: number;
+  pv4Voltage?: number;
+  pv4Current?: number;
 }
 
 export class BrowserCrawler {
@@ -1816,7 +1826,7 @@ export class BrowserCrawler {
                 dailyEnergy: device.dailyEnergy || 0,
                 totalYield: device.totalYield || 0,
                 activePower: device.activePower || 0,
-                reactivePower: 0,
+                reactivePower: device.reactivePower || 0,
                 ratedPower: 0,
                 powerFactor: device.powerFactor || 0,
                 gridFrequency: device.gridFrequency || 0,
@@ -1827,9 +1837,13 @@ export class BrowserCrawler {
                 outputMode: '',
                 startupTime: '',
                 shutdownTime: '',
-                pvStrings: [],
+                // Build pvStrings array from individual PV data
+                pvStrings: this.buildPvStrings(device),
                 efficiency: device.efficiency,
                 inputPower: device.inputPower,
+                // Meter-specific fields
+                positiveActiveEnergy: device.positiveActiveEnergy,
+                negativeActiveEnergy: device.negativeActiveEnergy,
               },
             });
             await this.delay(500);
@@ -2155,6 +2169,34 @@ export class BrowserCrawler {
     }
 
     return 'offline';
+  }
+
+  /**
+   * Build PV strings array from individual PV voltage/current fields
+   */
+  private buildPvStrings(device: Partial<BrowserDevice>): Array<{ stringId: string; voltage: number; current: number }> {
+    const pvStrings: Array<{ stringId: string; voltage: number; current: number }> = [];
+
+    // Check for PV1 through PV4 (common for residential inverters)
+    const pvData = [
+      { id: 'PV1', voltage: device.pv1Voltage, current: device.pv1Current },
+      { id: 'PV2', voltage: device.pv2Voltage, current: device.pv2Current },
+      { id: 'PV3', voltage: device.pv3Voltage, current: device.pv3Current },
+      { id: 'PV4', voltage: device.pv4Voltage, current: device.pv4Current },
+    ];
+
+    for (const pv of pvData) {
+      // Only include if we have at least voltage or current data
+      if (pv.voltage !== undefined || pv.current !== undefined) {
+        pvStrings.push({
+          stringId: pv.id,
+          voltage: pv.voltage || 0,
+          current: pv.current || 0,
+        });
+      }
+    }
+
+    return pvStrings;
   }
 
   /**

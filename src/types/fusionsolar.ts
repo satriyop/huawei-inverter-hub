@@ -90,6 +90,9 @@ export interface InverterRealtimeData {
   // Additional real-time fields
   efficiency?: number;         // %
   inputPower?: number;         // kW (DC input from PV)
+  // Meter-specific energy fields
+  positiveActiveEnergy?: number; // kWh (import from grid)
+  negativeActiveEnergy?: number; // kWh (export to grid)
 }
 
 export interface PVString {
