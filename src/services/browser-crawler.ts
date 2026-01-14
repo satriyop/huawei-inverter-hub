@@ -154,6 +154,21 @@ export class BrowserCrawler {
       timeout: 60000,
     });
 
+    // Check if already logged in (redirected to main page)
+    const redirectedUrl = this.page.url();
+    if (redirectedUrl.includes('#/home') || redirectedUrl.includes('/home/')) {
+      logger.info('Already logged in (redirected to main page)');
+      // Extract zone ID
+      const zoneIdMatch = redirectedUrl.match(/zone-id=([^&#]+)/);
+      this.zoneId = zoneIdMatch ? zoneIdMatch[1] : null;
+      this.isLoggedIn = true;
+      this.lastLoginTime = Date.now();
+      if (this.zoneId) {
+        logger.info(`Zone ID: ${this.zoneId}`);
+      }
+      return;
+    }
+
     // Wait for login form
     await this.waitForLoginForm();
 
